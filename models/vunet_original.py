@@ -1,18 +1,18 @@
 import torch
 from torch import nn
 from torch.nn import ModuleDict, ModuleList, Conv2d
-
-from models.modules import (
+from edflow import get_logger
+from edflow.util import retrieve
+from models.modules_orginal import (
     VUnetResnetBlock,
     Upsample,
     Downsample,
-    MyWeightNorm2d,
+    NormConv2d,
     SpaceToDepth,
     DepthToSpace,
 )
 import numpy as np
 from torch.distributions import MultivariateNormal
-from common import DEVICE
 
 
 class VUnetEncoder(nn.Module):
@@ -23,7 +23,7 @@ class VUnetEncoder(nn.Module):
             nf_start=64,
             nf_max=128,
             n_rnb=2,
-            conv_layer=MyWeightNorm2d,
+            conv_layer=NormConv2d,
             dropout_prob=0.0,
     ):
         super().__init__()
@@ -75,7 +75,7 @@ class VUnetEncoder(nn.Module):
 
 
 class ZConverter(nn.Module):
-    def __init__(self, n_stages, nf, device, conv_layer=MyWeightNorm2d, dropout_prob=0.0):
+    def __init__(self, n_stages, nf, device, conv_layer=NormConv2d, dropout_prob=0.0):
         super().__init__()
         self.n_stages = n_stages
         self.device = device
@@ -101,14 +101,20 @@ class ZConverter(nn.Module):
         for n, i_s in enumerate(range(self.n_stages, self.n_stages - 2, -1)):
             stage = f"s{i_s}"
 
-            spatial_size = x_f[stage + "_2"].shape[-1]
-            spatial_stage = "%dby%d" % (spatial_size, spatial_size)
-
             h = self.blocks[2 * n](h, x_f[stage + "_2"])  # todo: bug??? should be stage_2
 
-            params[spatial_stage] = h  # 后验的参数
-            z = self._latent_sample(params[spatial_stage])  # 传入的是均值，返回采样后的值
-            zs[spatial_stage] = z
+            params[stage] = h  # 后验的参数
+            if params[stage].shape[-1] != 1:
+                params[stage] = self.s2d(params[stage])
+
+            if x_f[stage + "_2"].shape[-1] > 1:
+                h = self.s2d(h)
+                z = self._latent_sample(h)
+                z = self.d2s(z)
+            else:
+                z = self._latent_sample(h)  # 传入的是均值，返回采样后的值
+            zs[stage] = z
+
             # post
             if n == 0:
                 gz = torch.cat([x_f[stage + "_1"], z], dim=1)
@@ -119,19 +125,14 @@ class ZConverter(nn.Module):
         return params, zs
 
     def _latent_sample(self, mean):
-        # 标准多元高斯分布采样
-        normal_sample = torch.randn(mean.size()).to(self.device)
-        return mean + normal_sample
+        sample_mean = torch.squeeze(torch.squeeze(mean, dim=-1), dim=-1)
 
-    # def _latent_sample(self, mean):
-    #     sample_mean = torch.squeeze(torch.squeeze(mean, dim=-1), dim=-1)
-    #
-    #     sampled = MultivariateNormal(
-    #         loc=torch.zeros_like(sample_mean, device=self.device),
-    #         covariance_matrix=torch.eye(sample_mean.shape[-1], device=self.device),
-    #     ).sample()  # 标准多元高斯分布采样
-    #     # sigma * epsilon + mu
-    #     return (sampled + sample_mean).unsqueeze(dim=-1).unsqueeze(dim=-1)
+        sampled = MultivariateNormal(
+            loc=torch.zeros_like(sample_mean, device=self.device),
+            covariance_matrix=torch.eye(sample_mean.shape[-1], device=self.device),
+        ).sample()  # 标准多元高斯分布采样
+        # sigma * epsilon + mu
+        return (sampled + sample_mean).unsqueeze(dim=-1).unsqueeze(dim=-1)
 
 
 class VUnetDecoder(nn.Module):
@@ -141,13 +142,13 @@ class VUnetDecoder(nn.Module):
             nf=128,
             nf_out=3,
             n_rnb=2,
-            conv_layer=MyWeightNorm2d,
+            conv_layer=NormConv2d,
             spatial_size=256,
             final_act=True,
             dropout_prob=0.0,
     ):
         super().__init__()
-
+        assert (2 ** (n_stages - 1)) == spatial_size
         self.final_act = final_act
         self.blocks = ModuleDict()
         self.ups = ModuleDict()
@@ -234,7 +235,7 @@ class VUnetBottleneck(nn.Module):
             device,
             n_rnb=2,
             n_auto_groups=4,
-            conv_layer=MyWeightNorm2d,
+            conv_layer=NormConv2d,
             dropout_prob=0.0,
     ):
         super().__init__()
@@ -320,24 +321,24 @@ class VUnetBottleneck(nn.Module):
         for i_s in range(self.n_stages, self.n_stages - 2, -1):
             stage = f"s{i_s}"
             spatial_size = x_e[stage + "_2"].shape[-1]
-            spatial_stage = "%dby%d" % (spatial_size, spatial_size)
 
             h = self.blocks[stage + "_2"](h, x_e[stage + "_2"])
 
             if spatial_size == 1:
-                p_params[spatial_stage] = h
+                p_params[stage] = h
                 # posterior_params[stage] = z_post[stage + "_2"]
-                prior_samples = self._latent_sample(p_params[spatial_stage])
-
-                z_prior[spatial_stage] = prior_samples
+                prior_samples = self._latent_sample(p_params[stage])
+                z_prior[stage] = torch.squeeze(
+                    torch.squeeze(prior_samples, dim=-1), dim=-1
+                )  # squeeze out spatial dims
                 # posterior_samples = self._latent_sample(posterior_params[stage])
             else:
                 # 是否使用后验的z
                 if use_z:
                     z_flat = (
-                        self.space_to_depth(z_post[spatial_stage])
-                        if z_post[spatial_stage].shape[2] > 1
-                        else z_post[spatial_stage]
+                        self.space_to_depth(z_post[stage])
+                        if z_post[stage].shape[2] > 1
+                        else z_post[stage]
                     )
                     sec_size = z_flat.shape[1] // 4
                     z_groups = torch.split(
@@ -365,18 +366,20 @@ class VUnetBottleneck(nn.Module):
                         else:
                             feedback = prior_samples
                         # todo 这里应该是 self.auto_blocks[i_a+1]
-                        param_features = self.auto_blocks[i_a + 1](param_features, feedback)
+                        param_features = self.auto_blocks[i_a+1](param_features, feedback)
 
-                p_params_stage = self.__merge_groups(param_groups)
+                p_params_stage = torch.cat(param_groups, dim=1)
                 prior_samples = self.__merge_groups(sample_groups)  # 先验的auto gressive采样，d2s
-                p_params[spatial_stage] = p_params_stage  # prior params
-                z_prior[spatial_stage] = prior_samples
+                p_params[stage] = p_params_stage  # prior params
+                z_prior[stage] = (
+                    self.space_to_depth(prior_samples).squeeze(dim=-1).squeeze(dim=-1)
+                )
 
             if use_z:
                 z = (
-                    self.depth_to_space(z_post[spatial_stage])
-                    if z_post[spatial_stage].shape[-1] != h.shape[-1]
-                    else z_post[spatial_stage]  # stage s8 will not use depth2space
+                    self.depth_to_space(z_post[stage])
+                    if z_post[stage].shape[-1] != h.shape[-1]
+                    else z_post[stage]  # stage s8 will not use depth2space
                 )
             else:
                 z = prior_samples
@@ -407,40 +410,45 @@ class VUnetBottleneck(nn.Module):
         return self.depth_to_space(torch.cat(x, dim=1))
 
     def _latent_sample(self, mean):
-        # 标准多元高斯分布采样
-        normal_sample = torch.randn(mean.size()).to(self.device)
-        return mean + normal_sample
+        sample_mean = torch.squeeze(torch.squeeze(mean, dim=-1), dim=-1)
+
+        sampled = MultivariateNormal(
+            loc=torch.zeros_like(sample_mean, device=self.device),
+            covariance_matrix=torch.eye(sample_mean.shape[-1], device=self.device),
+        ).sample()
+
+        return (sampled + sample_mean).unsqueeze(dim=-1).unsqueeze(dim=-1)
 
 
 class VUnet(nn.Module):
     def __init__(self, config):
         super().__init__()
-
+        self.logger = get_logger(self)
         self.config = config
 
-        final_act = config["model_pars"]["final_act"]
-        nf_max = config["model_pars"]["nf_max"]
-        nf_start = config["model_pars"]["nf_start"]
-        spatial_size = config["model_pars"]["spatial_size"]
-        dropout_prob = config["model_pars"]["dropout_prob"]
-        f_in_channels = config["model_pars"]["img_channels"]  # 8个crop
-        e_in_channels = config["model_pars"]["pose_channels"]
-        # in_plane_factor = config["model_pars"]["in_plane_factor"]
+        final_act = retrieve(config, "model_pars/final_act", default=False)
+        nf_max = retrieve(config, "model_pars/nf_max", default=128)
+        nf_start = retrieve(config, "model_pars/nf_start", default=64)
+        spatial_size = retrieve(config, "model_pars/spatial_size", default=128)
+        dropout_prob = retrieve(config, "model_pars/dropout_prob", default=0.0)
+        f_in_channels = retrieve(config, "model_pars/img_channels", default=3)
+        e_in_channels = retrieve(config, "model_pars/pose_channels", default=3)
 
         self.output_channels = 3
 
-        device = DEVICE
+        device = (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
 
         # define required parameters
-        # n_stages = 1 + int(np.round(np.log2(spatial_size))) - in_plane_factor
         n_stages = 1 + int(np.round(np.log2(spatial_size)))
+
         # if final activation shall be utilized, choose common pytorch convolution as conv layer, else custom Module that follows the original implementation
-        conv_layer_type = Conv2d if final_act else MyWeightNorm2d
+        conv_layer_type = Conv2d if final_act else NormConv2d
 
         # image processing encoder to produce the prosterior p( z | x,ŷ )
         # 实际上，输入的只有x
         self.f_phi = VUnetEncoder(
-            # n_stages=n_stages - in_plane_factor,
             n_stages=n_stages,
             nf_in=f_in_channels,
             nf_start=nf_start,
@@ -461,7 +469,6 @@ class VUnet(nn.Module):
 
         # zconverter
         self.zc = ZConverter(
-            # n_stages=n_stages - in_plane_factor,
             n_stages=n_stages,
             nf=nf_max,
             device=device,
@@ -492,6 +499,27 @@ class VUnet(nn.Module):
 
     def forward(self, inputs, mode="train"):
         '''
+        Parameters
+        ----------
+        inputs : dict
+            A dictionary containing two keys ``pose`` and ``appearance``.
+            Behind each key must be a 3D torch Tensor.
+        mode : str
+            Defines the mode in which the Bottlence is used. Must be one of
+            ``train, appearance_transfer, sample_appearance``. Default is
+            ``train``.
+
+        Returns
+        -------
+        out_img : torch.Tensor
+            The generated image of a person in the pose of ``stickman`` and
+            with the appearance of ``appearance`` from ``inputs``.
+
+        Attributes
+        ----------
+        saved_tensors : dict
+            Contains the q_means and p_means.
+
         有以下几种用法：
         1. 训练阶段。 pose和appearance是对应的，decoder从后验采样，进行重建
         2. appearance transfer阶段。 此时输入的 pose和appearance不是对应的，
@@ -500,14 +528,13 @@ class VUnet(nn.Module):
         3. sample appearance阶段。 此时的输入只有一个pose，我们从先验中采样（每次采样都不一样），
             然后decode用采样和pose的特征进行重建，所以sample多次的输出也不一样。
         '''
-        # 后验
+
+        # encoded shape image
+        x_e = self.e_theta(inputs['pose'])
+        # # encoded appearance image
         x_f = self.f_phi(inputs['appearance'])
         # sample z  后验的 参数 和 采样
         q_means, zs = self.zc(x_f)
-
-        # 先验
-        x_e = self.e_theta(inputs['pose'])
-
         # with prior and posterior distribution; don't use prior samples within this training
         # x_e-先验 zs-后验的采样
         if mode == "train":
@@ -531,28 +558,12 @@ class VUnet(nn.Module):
 
 
 if __name__ == '__main__':
-    import yaml
-
-    with open("../hyper-parameters.yaml") as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
-    vunet = VUnet(config).to(DEVICE)
-    x = torch.randn(4, 3, 256, 256).cuda()
-    c = torch.randn(4, 3, 256, 256).cuda()
-    xn = torch.randn(4, 3 * 8, 64, 64).cuda()
-    cn = torch.randn(4, 3 * 8, 64, 64)
-    in_dict = dict(x=x, c=c, xn=xn, cn=cn)
+    vunet = VUnet(config=None)
+    stickman = torch.randn(4, 3, 128, 128)
+    img = torch.randn(4, 3, 128, 128)
+    in_dict = dict(pose=stickman, appearance=img)
     out = vunet(in_dict)
     print(out.size())
-    torch.save(vunet.state_dict(), "./vunet.pt")
-
-    vunet_restore = VUnet(config).to(DEVICE)
-    """一定记得要把WeightNorm中的init设置为True"""
-    for module in vunet_restore.modules():
-        if isinstance(module, MyWeightNorm2d):
-            module.init = True
-    model_state_dict_restored = torch.load("./vunet.pt")
-    vunet_restore.load_state_dict(model_state_dict_restored)
-    vunet_restore.eval()
 
     # import torch.onnx
     #

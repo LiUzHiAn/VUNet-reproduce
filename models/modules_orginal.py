@@ -1,11 +1,6 @@
 import torch
 from torch import nn
 from torch.nn.utils import weight_norm
-from torch.nn.parameter import Parameter
-from torch import norm_except_dim
-import torch
-import torch.nn.functional as F
-import torch.optim as optim
 
 
 class SpaceToDepth(nn.Module):
@@ -39,56 +34,6 @@ class IDAct(nn.Module):
         return input
 
 
-"""
-weight normalization compatible with tf implementation
-"""
-
-
-class MyWeightNorm2d(nn.Module):
-
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True, init=False):
-        # def __init__(self, in_channel, out_channel, kernel_size,bias=True, init=False):
-        super(MyWeightNorm2d, self).__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
-        self.bias = bias
-        self.init = init
-
-        self.v = Parameter(torch.empty(out_channels, in_channels, kernel_size, kernel_size))
-        self.g = Parameter(torch.empty(out_channels))
-        if bias:
-            self.b = Parameter(torch.empty(out_channels))
-        else:
-            self.register_parameter('bias', None)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        torch.nn.init.normal_(self.v.data, mean=0.0, std=0.05)
-        torch.nn.init.constant_(self.g.data, val=1)
-        if self.bias:
-            torch.nn.init.constant_(self.b.data, val=0)
-
-    def forward(self, input):
-        v_norm = norm_except_dim(self.v, 2, dim=0)  # l2 norm, i.e. ||v||
-        v_divide_v_norm = self.v / v_norm
-        t = F.conv2d(input, v_divide_v_norm, None, stride=self.stride, padding=self.padding)
-        if not self.init:
-            std, mean = torch.std_mean(t, dim=[0, 2, 3])
-            self.g.data = 1 / (std + 1e-10)
-            self.b.data = -mean * self.g.data
-
-            self.init = True
-
-        out = self.g.view([1, self.out_channels, 1, 1]) * t + \
-              self.b.view([1, self.out_channels, 1, 1])
-
-        return out
-
-
 class NormConv2d(nn.Module):
     """
     Convolutional layer with l2 weight normalization and learned scaling parameters
@@ -116,15 +61,15 @@ class NormConv2d(nn.Module):
 
 
 class Downsample(nn.Module):
-    def __init__(self, channels, out_channels=None, conv_layer=MyWeightNorm2d, init=False):
+    def __init__(self, channels, out_channels=None, conv_layer=NormConv2d):
         super().__init__()
         if out_channels == None:
             self.down = conv_layer(
-                channels, channels, kernel_size=3, stride=2, padding=1, init=init,
+                channels, channels, kernel_size=3, stride=2, padding=1
             )
         else:
             self.down = conv_layer(
-                channels, out_channels, kernel_size=3, stride=2, padding=1, init=init,
+                channels, out_channels, kernel_size=3, stride=2, padding=1
             )
 
     def forward(self, x):
@@ -132,10 +77,10 @@ class Downsample(nn.Module):
 
 
 class Upsample(nn.Module):
-    def __init__(self, in_channels, out_channels, subpixel=True, conv_layer=MyWeightNorm2d, init=False, ):
+    def __init__(self, in_channels, out_channels, subpixel=True, conv_layer=NormConv2d):
         super().__init__()
         if subpixel:
-            self.up = conv_layer(in_channels, 4 * out_channels, 3, padding=1, init=init, )
+            self.up = conv_layer(in_channels, 4 * out_channels, 3, padding=1)
             self.op2 = DepthToSpace(block_size=2)
         else:
             # channels have to be bisected because of formely concatenated skips connections
@@ -161,11 +106,10 @@ class VUnetResnetBlock(nn.Module):
             use_skip=False,
             kernel_size=3,
             activate=True,
-            conv_layer=MyWeightNorm2d,
+            conv_layer=NormConv2d,
             gated=False,
             final_act=False,
             dropout_prob=0.0,
-            init=False,
     ):
         """
 
@@ -184,10 +128,9 @@ class VUnetResnetBlock(nn.Module):
                 out_channels=out_channels,
                 kernel_size=kernel_size,
                 padding=kernel_size // 2,
-                init=init,
             )
             self.pre = conv_layer(
-                in_channels=out_channels, out_channels=out_channels, kernel_size=1, init=init,
+                in_channels=out_channels, out_channels=out_channels, kernel_size=1,
             )
         else:
             self.conv2d = conv_layer(
@@ -195,7 +138,6 @@ class VUnetResnetBlock(nn.Module):
                 out_channels=out_channels,
                 kernel_size=kernel_size,
                 padding=kernel_size // 2,
-                init=init,
             )
 
         if self.gated:
@@ -204,7 +146,6 @@ class VUnetResnetBlock(nn.Module):
                 out_channels=out_channels,
                 kernel_size=kernel_size,
                 padding=kernel_size // 2,
-                init=init,
             )
             self.dout2 = nn.Dropout(p=dropout_prob)
             self.sigm = nn.Sigmoid()
@@ -233,27 +174,3 @@ class VUnetResnetBlock(nn.Module):
             x_prc = a * self.sigm(b)
 
         return x + x_prc  # 这一层没带激活的输出
-
-
-if __name__ == '__main__':
-    module = MyWeightNorm2d(in_channels=3, out_channels=10, kernel_size=3, padding=1)
-
-    out1 = module(torch.rand(4, 3, 16, 16))  # 这里的结果是 v*x/||v||
-    loss1 = torch.sum((torch.ones_like(out1) - out1) ** 2 + out1, dim=[0, 1, 2, 3])
-
-    module_dict = module.state_dict()
-    torch.save(module_dict, "./module.pt")
-
-    module = MyWeightNorm2d(in_channels=3, out_channels=10, kernel_size=3, padding = 1, init = True)
-    module_dict_restored = torch.load("./module.pt")
-    module.load_state_dict(module_dict_restored)
-
-    # optimizer = optim.Adam(module.parameters(), lr=1e-1, betas=(0.5, 0.9))
-    # optimizer.zero_grad()
-    # loss1.backward()
-    # optimizer.step()
-    #
-    # repeat again
-    out2 = module(torch.rand(4, 3, 16, 16))
-    loss2 = torch.sum((torch.ones_like(out2) - out2) ** 2 + out2, dim=[0, 1, 2, 3])
-    loss2.backward()

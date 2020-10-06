@@ -1,5 +1,7 @@
 from itertools import repeat
 import pandas as pd
+import torch
+import numpy as np
 
 
 def inf_loop(data_loader):
@@ -8,7 +10,22 @@ def inf_loop(data_loader):
         yield from loader
 
 
+def np2pt(array):
+    '''Converts a numpy array to torch Tensor. If possible pushes to the
+    GPU.'''
+    tensor = torch.tensor(array, dtype=torch.float32)
+    if torch.cuda.is_available():
+        tensor = tensor.cuda()
+    tensor = tensor.permute(0, 3, 1, 2)
+    tensor = tensor.contiguous()
+    return tensor
 
+
+def pt2np(tensor):
+    '''Converts a torch Tensor to a numpy array.'''
+    array = tensor.detach().cpu().numpy()
+    array = np.transpose(array, (0, 2, 3, 1))
+    return array
 
 
 class MetricTracker:

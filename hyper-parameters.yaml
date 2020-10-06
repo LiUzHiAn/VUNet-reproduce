@@ -7,20 +7,20 @@ losses:
         start_ramp_val: 0
         end_ramp_val: 1
     vgg:
-        weight: 1.
+        weight: 5
         vgg_feat_weights: [1,1,1,1,1,1]
     gram:
         gram_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
 # Mandatory Training Parameters
 batch_size: 4
-num_epochs: 20
+num_epochs: 100
 
 # Learning rate
-lr: 0.00003
+lr: 0.0001
 
 model_pars:
     # Activation after final decoding layer
-    final_act: True
+    final_act: False
     # Feature depth after first encoding convolution.
     # Will be doubled after each stage
     nf_start: 64

@@ -9,6 +9,7 @@ import yaml
 import torch.optim as optim
 from common import DEVICE
 from torch.utils.data.dataloader import DataLoader
+from datasets.MyDataset import MyDeepFashion
 
 # fix random seeds for reproducibility
 SEED = 123
@@ -25,10 +26,14 @@ def main(config_file="./hyper-parameters.yaml"):
     # setup data_loader instances
     train_dataset = COCODataset(index_file='/home/liuzhian/hdd/datasets/deepfashion/index.p',
                                 spatial_size=config["model_pars"]["spatial_size"], phase='train')
-    train_dataloader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True,
+
+    # train_dataset = MyDeepFashion('/home/liuzhian/hdd/datasets/deepfashion/index.p')
+
+    train_dataloader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=False,
                                   num_workers=0, drop_last=True)
     valid_dataset = COCODataset(index_file='/home/liuzhian/hdd/datasets/deepfashion/index.p',
                                 spatial_size=config["model_pars"]["spatial_size"], phase='valid')
+    # valid_dataset = MyDeepFashion('/home/liuzhian/hdd/datasets/deepfashion/index.p', is_train=False)
     val_dataloader = DataLoader(valid_dataset, batch_size=config["batch_size"], shuffle=False,
                                 num_workers=0, drop_last=False)
 
@@ -40,8 +45,8 @@ def main(config_file="./hyper-parameters.yaml"):
     trainer = Trainer(config, model, optimizer,
                       train_dataloader,
                       val_dataloader,
-                      log_dir="./log/",
-                      ckpt_path="./ckpt/vunet-ckpt.pth",
+                      log_dir="./log/dummy",
+                      ckpt_path="./ckpt/dummy/vunet.pt",
                       lr_scheduler=lr_scheduler)
 
     trainer.train()

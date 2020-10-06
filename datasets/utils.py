@@ -265,7 +265,7 @@ def get_crop(bpart, joints, jo, wh, o_w, o_h, ar=1.0):
 
 def normalize(img, coords, stickman, joints_order, box_factor):
     """in-plane normalization, 输入的img和stickman的范围都是 [-1,1]"""
-    verbose = True
+    verbose = False
 
     o_h, o_w = img.shape[0], img.shape[1]
     h = o_h // 2 ** box_factor

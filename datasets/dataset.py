@@ -5,6 +5,7 @@ import pickle
 import torch
 
 from datasets.utils import *
+from edflow.data.util import adjust_support
 
 
 class COCODataset(Dataset):
@@ -25,7 +26,8 @@ class COCODataset(Dataset):
         samples = []
 
         # 必须要有的关节点 及 索引
-        required_points = ["lshoulder", "rshoulder", "lhip", "rhip"]
+        # required_points = ["lshoulder", "rshoulder", "lhip", "rhip"]
+        required_points = self.joints_order
         required_points_indices = [self.joints_order.index(point) for point in required_points]
 
         is_train = (phase == 'train')
@@ -66,15 +68,16 @@ class COCODataset(Dataset):
 
         # 图片
         img_absolute_path = os.path.join(self.dataset_root, self.samples[idx]["img_path"])
-        im = preprocess_img(load_img(img_absolute_path, target_shape=[self.spatial_size, self.spatial_size, 3]))
-        data["im"] = torch.from_numpy(np.transpose(im, axes=[2, 0, 1]))
+        im = adjust_support(cv2.imread(img_absolute_path), "-1->1", "0->255")
+        data["im"] = torch.from_numpy(np.transpose(im, axes=[2, 0, 1]).astype(np.float32))
 
         # keypoints to stickman
-        raw_stickman = preprocess_img(cv2_keypoints2stickman(data["keyponits_coordinates"], self.spatial_size))
-        data["stickman"] = torch.from_numpy(np.transpose(raw_stickman, axes=[2, 0, 1]).astype(np.float32))
+        stickman = adjust_support(cv2_keypoints2stickman(data["keyponits_coordinates"], self.spatial_size),
+                                  "-1->1",
+                                  "0->255")
+        data["stickman"] = torch.from_numpy(np.transpose(stickman, axes=[2, 0, 1]).astype(np.float32))
 
-        im_norm, stickman_norm = normalize(im, data["keyponits_coordinates"], raw_stickman, self.joints_order, 2)
-
+        im_norm, stickman_norm = normalize(im, data["keyponits_coordinates"], stickman, self.joints_order, 2)
         data["im_norm"] = torch.from_numpy(np.transpose(im_norm, axes=[2, 0, 1]).astype(np.float32))
         data["stickman_norm"] = torch.from_numpy(np.transpose(stickman_norm, axes=[2, 0, 1]).astype(np.float32))
         return data
@@ -85,15 +88,12 @@ if __name__ == '__main__':
     ds = COCODataset(index_file='/home/liuzhian/hdd/datasets/deepfashion/index.p',
                      spatial_size=256)
     dataloader = DataLoader(ds, batch_size=1,
-                            shuffle=True, num_workers=0)
+                            shuffle=False, num_workers=0)
 
     for data in dataloader:
         im = np.transpose(data["im"][0].numpy(), axes=(1, 2, 0))
         stickman = np.transpose(data["stickman"][0].numpy(), axes=(1, 2, 0))
 
-        # plt.subplot(2, 1, 1)
-        # plt.imshow(postprocess(im))
-        # plt.subplot(2, 1, 2)
-        # plt.imshow(postprocess(stickman))
-        #
-        # plt.show()
+        cv2.imshow('im', postprocess(im))
+        cv2.imshow('stickman', postprocess(stickman))
+        cv2.waitKey(0)
