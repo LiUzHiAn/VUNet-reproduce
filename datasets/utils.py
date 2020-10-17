@@ -5,13 +5,6 @@ from PIL import Image, ImageDraw
 import cv2
 
 
-# COLORS = {
-#     "body": (0, 0, 255, 0),  # blue
-#     "left": (0, 255, 0, 0),  # green
-#     "right": (255, 0, 0, 0)  # red
-# }
-
-
 def valid_joints(*joints):
     j = np.stack(joints)
     return (j >= 0).all()
@@ -52,74 +45,6 @@ def load_img(path, target_shape):
         x = np.expand_dims(x, -1)
 
     return x
-
-
-def cv2_keypoints2stickman(kps, spatial_size=256, keypoints_mode=OPEN_POSE18):
-    # Create canvas
-
-    scale_factor = spatial_size / 128
-    thickness = int(3 * scale_factor)
-
-    imgs = list()
-    for i in range(3):
-        imgs.append(np.zeros((spatial_size, spatial_size), dtype="uint8"))
-
-    joints_order = keypoints_mode["order"]
-    # 组成身体的部分,用蓝色
-    body_point_indices = [joints_order.index(point) for point in keypoints_mode["body"]]
-    body_pts = []
-    for idx in body_point_indices:
-        point = np.int_(kps[idx]).tolist()
-        # if point[0] <= 0 and point[1] <= 0:
-        #     continue  # 忽略小于0的部分
-        body_pts += [tuple(point)]
-    cv2.fillPoly(imgs[2], np.array([body_pts], dtype=np.int32), 255)
-
-    # 人的右边
-    for line in keypoints_mode["right_lines"]:
-        line_indices = [joints_order.index(line[0]), joints_order.index(line[1])]
-        a = tuple(np.int_(kps[line_indices[0]]))
-        b = tuple(np.int_(kps[line_indices[1]]))
-        if (a[0] <= 0 and a[1] <= 0) \
-                or (b[0] <= 0 and b[1] <= 0):
-            continue
-        cv2.line(imgs[0], a, b, color=255, thickness=thickness)
-    # 人的左边
-    for line in keypoints_mode["left_lines"]:
-        line_indices = [joints_order.index(line[0]), joints_order.index(line[1])]
-        a = tuple(np.int_(kps[line_indices[0]]))
-        b = tuple(np.int_(kps[line_indices[1]]))
-        if (a[0] <= 0 and a[1] <= 0) \
-                or (b[0] <= 0 and b[1] <= 0):
-            continue
-        cv2.line(imgs[1], a, b, color=255, thickness=thickness)
-
-    # 头部的连线
-    nose_point = kps[joints_order.index(keypoints_mode["center_nose"])]  # 鼻子
-    right_shoulder_ponit = kps[joints_order.index(keypoints_mode["right_shoulder"])]
-    right_eye_ponit = kps[joints_order.index(keypoints_mode["right_eye"])]
-    left_shoulder_ponit = kps[joints_order.index(keypoints_mode["left_shoulder"])]
-    left_eye_ponit = kps[joints_order.index(keypoints_mode["left_eye"])]
-    neck = (right_shoulder_ponit + left_shoulder_ponit) / 2
-    # 鼻子到脖子的连线
-    a = tuple(np.int_(neck))
-    b = tuple(np.int_(nose_point))
-    if np.min(a) >= 0 and np.min(b) >= 0:
-        cv2.line(imgs[0], a, b, color=127, thickness=thickness)
-        cv2.line(imgs[1], a, b, color=127, thickness=thickness)
-
-    # 鼻子到眼睛的连线
-    cn = tuple(np.int_(nose_point))
-    leye = tuple(np.int_(left_eye_ponit))
-    reye = tuple(np.int_(right_eye_ponit))
-    if np.min(reye) >= 0 and np.min(leye) >= 0 and np.min(cn) >= 0:
-        cv2.line(imgs[0], cn, reye, color=255, thickness=thickness)  # 右边眼睛为[255,0,0],蓝色
-        cv2.line(imgs[1], cn, leye, color=255, thickness=thickness)  # 右边眼睛为[0,255,0],绿色
-
-    # todo: Draw Points  画所有的关节点
-    img = np.stack(imgs, axis=-1)
-
-    return img
 
 
 def keypoints2stickman(kps, spatial_size=256, keypoints_mode=OPEN_POSE18):
@@ -302,7 +227,7 @@ def normalize(img, coords, stickman, joints_order, box_factor):
                 verbose_img = cv2.circle(verbose_img, tuple(part_src[2]), radius=2, color=(0, 0, 255), thickness=2)
                 verbose_img = cv2.circle(verbose_img, tuple(part_src[3]), radius=2, color=(0, 0, 0), thickness=2)
 
-                verbose_stickman = postprocess(stickman)
+                verbose_stickman = postprocess(stickman[:, :, ::-1])
                 verbose_stickman = cv2.circle(verbose_stickman, tuple(part_src[0]), radius=2, color=(255, 0, 0),
                                               thickness=2)  # 蓝
                 verbose_stickman = cv2.circle(verbose_stickman, tuple(part_src[1]), radius=2, color=(0, 255, 0),
@@ -314,7 +239,7 @@ def normalize(img, coords, stickman, joints_order, box_factor):
 
                 cv2.imshow("part_img", postprocess(part_img)[:, :, ::-1])
                 cv2.imshow("img", verbose_img)
-                cv2.imshow("part_stickman", postprocess(part_stickman))
+                cv2.imshow("part_stickman", postprocess(part_stickman)[:, :, ::-1])
                 cv2.imshow("stickman", verbose_stickman)
                 cv2.waitKey(0)
 

@@ -1,113 +1,88 @@
-import torch.nn as nn
-from torchvision.models import vgg19
-import torchvision.transforms as transforms
 import torch
 from collections import namedtuple
-from losses.utils import aggregate_kl_loss
+from torchvision.models import vgg19
+from torchvision import transforms
+from typing import Tuple
+import torch.nn as nn
 
-VGG19_OUTPUT = namedtuple(
-    "VGG19_OUTPUT", ["input", "relu1_2", "relu2_2", "relu3_2", "relu4_2", "relu5_2"],
-)
-VGG19_TARGET_LAYERS = {
+
+def update_loss_weights_inplace(loss_config, step):
+    # 缓慢增加kl loss的权重
+    for weight_dict in loss_config.values():
+        if "end_ramp_it" in weight_dict:
+            if step < weight_dict["end_ramp_it"] // 2:
+                weight_dict["weight"] = weight_dict["start_ramp_val"]
+            elif step > weight_dict["end_ramp_it"] // 4 * 3:
+                weight_dict["weight"] = weight_dict["end_ramp_val"]
+            else:
+                ramp_progress = (step - weight_dict["end_ramp_it"] // 2) / (
+                        weight_dict["end_ramp_it"] // 4 * 3 - weight_dict["end_ramp_it"] // 2
+                )
+                ramp_diff = weight_dict["end_ramp_val"] - weight_dict["start_ramp_val"]
+                weight_dict["weight"] = (
+                        ramp_progress * ramp_diff + weight_dict["start_ramp_val"]
+                )
+
+
+def update_lr_dynamically(step,
+                          start, end,
+                          start_value, end_value, ):
+    """linear from (a, alpha) to (b, beta), i.e.
+        (beta - alpha)/(b - a) * (x - a) + alpha"""
+    if step <= start:
+        return start_value
+    elif step >= end:
+        return end_value
+    linear = (
+            (end_value - start_value) / (end - start) *
+            (step - start) +
+            start_value
+    )
+    return linear
+
+
+def latent_kl(prior_mean, posterior_mean):
+    """
+    :param prior_mean:
+    :param posterior_mean:
+    :return:
+    """
+    kl = 0.5 * torch.pow(prior_mean - posterior_mean, 2)
+    kl = torch.sum(kl, dim=[1, 2, 3])
+
+    return kl
+
+
+def aggregate_kl_loss(prior_means, posterior_means):
+    kl_stages = []
+    for p, q in zip(list(prior_means.values()), list(posterior_means.values())):
+        kl_stages.append(latent_kl(p, q).unsqueeze(dim=-1))
+
+    kl_stages = torch.cat(kl_stages, dim=-1)
+    kl_loss = torch.sum(kl_stages, dim=-1)
+    return kl_loss
+
+
+class L1LossInstances(torch.nn.L1Loss):
+    """L1Loss, which reduces to instances of the batch
+    """
+
+    def __init__(self):
+        super().__init__(reduction="none")
+
+    def forward(self, image: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        super_result = super().forward(image, target)
+        reduced = super_result.mean(axis=(1, 2, 3))
+        return reduced
+
+
+VGGTargetLayers = {
     "3": "relu1_2",
     "8": "relu2_2",
     "13": "relu3_2",
     "22": "relu4_2",
     "31": "relu5_2",
 }
-
-
-def scale_img(x):
-    """
-    Scale a input image with range [-1,1] into range [0,1]
-    :param x:
-    :return:
-    """
-    # ma = torch.max(x)
-    # mi = torch.min(x)
-    out = (x + 1.0) / 2.0
-    out = torch.clamp(out, 0.0, 1.0)
-    return out
-
-
-class _PerceptualVGG(nn.Module):
-    def __init__(self, vgg_model):
-        super(_PerceptualVGG, self).__init__()
-        self.vgg_model = vgg_model
-        self.vgg_lyrs = self.vgg_model.features
-
-        self.input_transform = transforms.Compose(
-            [
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                )
-            ]
-        )
-
-    def forward(self, x):
-        out = {"input": x}
-        x = scale_img(x)
-        # normalize appropriate for vgg
-        x = torch.stack([self.input_transform(elem) for elem in torch.unbind(x)])
-
-        with torch.no_grad():
-            for module_num, submodule in self.vgg_lyrs._modules.items():
-                if module_num in VGG19_TARGET_LAYERS:
-                    x = submodule(x)
-                    out[VGG19_TARGET_LAYERS[module_num]] = x
-                else:
-                    x = submodule(x)
-
-        return VGG19_OUTPUT(**out)
-
-
-class PerceptualLoss(nn.Module):
-    def __init__(self, vgg19_feats_weights, use_gram=True, gram_feats_weigths=None):
-        super(PerceptualLoss, self).__init__()
-        self.vgg = vgg19(pretrained=True).eval()
-
-        self.custome_vgg = _PerceptualVGG(self.vgg)
-        self.vgg19_feats_weights = vgg19_feats_weights
-
-        assert len(vgg19_feats_weights) == len(VGG19_TARGET_LAYERS) + 1
-        if use_gram:
-            self.grammer = GramLoss()
-            self.gram_feats_weigths = gram_feats_weigths
-        else:
-            self.grammer = None
-            self.self.gram_feats_weigths = None
-
-    def forward(self, pred, target):
-        pred_feats = self.custome_vgg(pred)
-        target_feats = self.custome_vgg(target)
-
-        vgg_loss = []
-        for i, (pred_f, target_f) in enumerate(zip(pred_feats, target_feats)):
-            vgg_loss.append(self.vgg19_feats_weights[i] * \
-                            torch.mean(torch.abs(pred_f - target_f), dim=[1, 2, 3]).unsqueeze(dim=-1))
-        vgg_loss = torch.cat(vgg_loss, dim=-1)
-
-        if self.grammer is not None:
-            gram_loss = []
-            for i, (pred_f, target_f) in enumerate(zip(pred_feats, target_feats)):
-                gram_loss.append(self.gram_feats_weigths[i] * self.grammer(pred_f, target_f).unsqueeze(dim=-1))
-            gram_loss = torch.cat(gram_loss, dim=-1)
-
-        if self.grammer is not None:
-            loss = vgg_loss + gram_loss
-        else:
-            loss = vgg_loss
-
-        loss = torch.sum(loss, dim=-1)
-        return loss
-
-
-class KLLoss(nn.Module):
-    def __init__(self):
-        super(KLLoss, self).__init__()
-
-    def forward(self, prior_means, posterior_means):
-        return aggregate_kl_loss(prior_means, posterior_means)
 
 
 class GramLoss(nn.Module):
@@ -138,12 +113,80 @@ class _Gram(nn.Module):
         return gram
 
 
+class VGGPerceptualLossInstances(torch.nn.Module):
+    def __init__(self, config, resize=False, use_gram=False):
+        super(VGGPerceptualLossInstances, self).__init__()
+        self.config = config
+        self.vgg_feat_weights = config.setdefault(
+            "vgg_feat_weights", (len(VGGTargetLayers) + 1) * [1.0]
+        )
+        assert len(self.vgg_feat_weights) == len(VGGTargetLayers) + 1
+
+        if use_gram:
+            self.grammer = GramLoss()
+            self.gram_feat_weigths = config.setdefault(
+                "gram_feat_weights", (len(VGGTargetLayers) + 1) * [0.1]
+            )
+        else:
+            self.grammer = None
+            self.gram_feats_weigths = None
+
+        device = "cuda:0"
+        self.l1_losser = nn.L1Loss(reduction="none").to(device)
+        blocks = []
+        blocks.append(vgg19(pretrained=True).to(device).features[:4].eval())
+        blocks.append(vgg19(pretrained=True).to(device).features[4:9].eval())
+        blocks.append(vgg19(pretrained=True).to(device).features[9:14].eval())
+        blocks.append(vgg19(pretrained=True).to(device).features[14:23].eval())
+        blocks.append(vgg19(pretrained=True).to(device).features[23:32].eval())
+        for bl in blocks:
+            for p in bl:
+                p.requires_grad = False
+        self.blocks = torch.nn.ModuleList(blocks)
+        self.transform = torch.nn.functional.interpolate
+        self.mean = torch.nn.Parameter(torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.std = torch.nn.Parameter(torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+        self.resize = resize
+
+    def forward(self, input, target):
+
+        if input.shape[1] != 3:
+            input = input.repeat(1, 3, 1, 1)
+            target = target.repeat(1, 3, 1, 1)
+
+        # [-1,1] to [0,1]
+        input = torch.clamp((input + 1) / 2, 0, 1)
+        target = torch.clamp((target + 1) / 2, 0, 1)
+
+        input = (input - self.mean) / self.std
+        target = (target - self.mean) / self.std
+        if self.resize:
+            input = self.transform(input, mode='bilinear', size=(224, 224), align_corners=False)
+            target = self.transform(target, mode='bilinear', size=(224, 224), align_corners=False)
+
+        x = input
+        y = target
+        instance_loss = torch.mean(torch.abs(x - y), dim=[1, 2, 3]) * self.vgg_feat_weights[0]  # l1 loss
+        if self.grammer is not None:
+            instance_loss += self.grammer(x, y) * self.gram_feat_weigths[0]
+
+        for i in range(len(self.blocks)):
+            block = self.blocks[i]
+            x = block(x)
+            y = block(y)
+            instance_loss += self.vgg_feat_weights[i + 1] * torch.mean(torch.abs(x - y), dim=[1, 2, 3])
+            if self.grammer is not None:
+                instance_loss += self.gram_feat_weigths[i + 1] * self.grammer(x, y)
+        return instance_loss
+
+
 if __name__ == '__main__':
-    vgg19_losser = PerceptualLoss(vgg19_feats_weights=[1, 1, 1, 1, 1, 1],
-                                  use_gram=True,
-                                  gram_feats_weigths=[0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
-    pred = torch.randn(4, 3, 224, 224)
-    target = torch.randn(4, 3, 224, 224)
+    import yaml
+
+    config = yaml.safe_load(open('../hyper-parameters.yaml'))
+    vgg19_losser = VGGPerceptualLossInstances(config, use_gram=True).cuda()
+    pred = torch.randn(4, 3, 224, 224).cuda()
+    target = torch.randn(4, 3, 224, 224).cuda()
     vgg19_loss = vgg19_losser(pred, target)
     print(vgg19_loss)
 

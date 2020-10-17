@@ -1,18 +1,18 @@
 import torch
 from torch import nn
 from torch.nn import ModuleDict, ModuleList, Conv2d
-
+from edflow.util import retrieve
 from models.modules import (
     VUnetResnetBlock,
     Upsample,
     Downsample,
-    MyWeightNorm2d,
+    NormConv2d,
     SpaceToDepth,
     DepthToSpace,
 )
 import numpy as np
 from torch.distributions import MultivariateNormal
-from common import DEVICE
+from utils import DEVICE
 
 
 class VUnetEncoder(nn.Module):
@@ -23,7 +23,7 @@ class VUnetEncoder(nn.Module):
             nf_start=64,
             nf_max=128,
             n_rnb=2,
-            conv_layer=MyWeightNorm2d,
+            conv_layer=NormConv2d,
             dropout_prob=0.0,
     ):
         super().__init__()
@@ -75,7 +75,7 @@ class VUnetEncoder(nn.Module):
 
 
 class ZConverter(nn.Module):
-    def __init__(self, n_stages, nf, device, conv_layer=MyWeightNorm2d, dropout_prob=0.0):
+    def __init__(self, n_stages, nf, device, conv_layer=NormConv2d, dropout_prob=0.0):
         super().__init__()
         self.n_stages = n_stages
         self.device = device
@@ -104,7 +104,7 @@ class ZConverter(nn.Module):
             spatial_size = x_f[stage + "_2"].shape[-1]
             spatial_stage = "%dby%d" % (spatial_size, spatial_size)
 
-            h = self.blocks[2 * n](h, x_f[stage + "_2"])  # todo: bug??? should be stage_2
+            h = self.blocks[2 * n](h, x_f[stage + "_2"])
 
             params[spatial_stage] = h  # 后验的参数
             z = self._latent_sample(params[spatial_stage])  # 传入的是均值，返回采样后的值
@@ -141,7 +141,7 @@ class VUnetDecoder(nn.Module):
             nf=128,
             nf_out=3,
             n_rnb=2,
-            conv_layer=MyWeightNorm2d,
+            conv_layer=NormConv2d,
             spatial_size=256,
             final_act=True,
             dropout_prob=0.0,
@@ -193,8 +193,8 @@ class VUnetDecoder(nn.Module):
         self.final_layer = conv_layer(nf, nf_out, kernel_size=1)
 
         # conditionally: set final activation
-        if self.final_act:
-            self.final_act = nn.Tanh()
+        # if self.final_act:
+        self.final_act = nn.Tanh()
 
     def forward(self, x, skips):
         """
@@ -234,7 +234,7 @@ class VUnetBottleneck(nn.Module):
             device,
             n_rnb=2,
             n_auto_groups=4,
-            conv_layer=MyWeightNorm2d,
+            conv_layer=NormConv2d,
             dropout_prob=0.0,
     ):
         super().__init__()
@@ -418,31 +418,33 @@ class VUnet(nn.Module):
 
         self.config = config
 
-        final_act = config["model_pars"]["final_act"]
-        nf_max = config["model_pars"]["nf_max"]
-        nf_start = config["model_pars"]["nf_start"]
-        spatial_size = config["model_pars"]["spatial_size"]
-        dropout_prob = config["model_pars"]["dropout_prob"]
-        f_in_channels = config["model_pars"]["img_channels"]  # 8个crop
-        e_in_channels = config["model_pars"]["pose_channels"]
-        # in_plane_factor = config["model_pars"]["in_plane_factor"]
+        final_act = retrieve(config, "model_pars/final_act", default=False)
+        nf_max = retrieve(config, "model_pars/nf_max", default=128)
+        nf_start = retrieve(config, "model_pars/nf_start", default=64)
+        spatial_size = retrieve(config, "model_pars/spatial_size", default=128)
+        dropout_prob = retrieve(config, "model_pars/dropout_prob", default=0.1)
+        f_in_channels = retrieve(config, "model_pars/img_channels", default=3)
+        e_in_channels = retrieve(config, "model_pars/pose_channels", default=3)
+
+        in_plane_factor = retrieve(config, "model_pars/in_plane_factor", default=2)
+        num_crops = retrieve(config, "model_pars/num_crops", default=8)
 
         self.output_channels = 3
 
         device = DEVICE
 
         # define required parameters
-        # n_stages = 1 + int(np.round(np.log2(spatial_size))) - in_plane_factor
-        n_stages = 1 + int(np.round(np.log2(spatial_size)))
+        n_stages = 1 + int(np.round(np.log2(spatial_size)))-2
         # if final activation shall be utilized, choose common pytorch convolution as conv layer, else custom Module that follows the original implementation
-        conv_layer_type = Conv2d if final_act else MyWeightNorm2d
+        conv_layer_type = Conv2d if final_act else NormConv2d
 
         # image processing encoder to produce the prosterior p( z | x,ŷ )
         # 实际上，输入的只有x
         self.f_phi = VUnetEncoder(
-            # n_stages=n_stages - in_plane_factor,
-            n_stages=n_stages,
-            nf_in=f_in_channels,
+            n_stages=n_stages - in_plane_factor,
+            # n_stages=n_stages,
+            nf_in=f_in_channels*num_crops,
+            # nf_in=f_in_channels,
             nf_start=nf_start,
             nf_max=nf_max,
             conv_layer=conv_layer_type,
@@ -461,8 +463,8 @@ class VUnet(nn.Module):
 
         # zconverter
         self.zc = ZConverter(
-            # n_stages=n_stages - in_plane_factor,
-            n_stages=n_stages,
+            n_stages=n_stages - in_plane_factor,
+            # n_stages=n_stages,
             nf=nf_max,
             device=device,
             conv_layer=conv_layer_type,
@@ -547,9 +549,9 @@ if __name__ == '__main__':
 
     vunet_restore = VUnet(config).to(DEVICE)
     """一定记得要把WeightNorm中的init设置为True"""
-    for module in vunet_restore.modules():
-        if isinstance(module, MyWeightNorm2d):
-            module.init = True
+    # for module in vunet_restore.modules():
+    #     if isinstance(module, MyWeightNorm2d):
+    #         module.init = True
     model_state_dict_restored = torch.load("./vunet.pt")
     vunet_restore.load_state_dict(model_state_dict_restored)
     vunet_restore.eval()

@@ -116,15 +116,15 @@ class NormConv2d(nn.Module):
 
 
 class Downsample(nn.Module):
-    def __init__(self, channels, out_channels=None, conv_layer=MyWeightNorm2d, init=False):
+    def __init__(self, channels, out_channels=None, conv_layer=NormConv2d,):
         super().__init__()
         if out_channels == None:
             self.down = conv_layer(
-                channels, channels, kernel_size=3, stride=2, padding=1, init=init,
+                channels, channels, kernel_size=3, stride=2, padding=1,
             )
         else:
             self.down = conv_layer(
-                channels, out_channels, kernel_size=3, stride=2, padding=1, init=init,
+                channels, out_channels, kernel_size=3, stride=2, padding=1,
             )
 
     def forward(self, x):
@@ -132,10 +132,10 @@ class Downsample(nn.Module):
 
 
 class Upsample(nn.Module):
-    def __init__(self, in_channels, out_channels, subpixel=True, conv_layer=MyWeightNorm2d, init=False, ):
+    def __init__(self, in_channels, out_channels, subpixel=True, conv_layer=NormConv2d, ):
         super().__init__()
         if subpixel:
-            self.up = conv_layer(in_channels, 4 * out_channels, 3, padding=1, init=init, )
+            self.up = conv_layer(in_channels, 4 * out_channels, 3, padding=1, )
             self.op2 = DepthToSpace(block_size=2)
         else:
             # channels have to be bisected because of formely concatenated skips connections
@@ -161,11 +161,10 @@ class VUnetResnetBlock(nn.Module):
             use_skip=False,
             kernel_size=3,
             activate=True,
-            conv_layer=MyWeightNorm2d,
+            conv_layer=NormConv2d,
             gated=False,
             final_act=False,
             dropout_prob=0.0,
-            init=False,
     ):
         """
 
@@ -184,10 +183,10 @@ class VUnetResnetBlock(nn.Module):
                 out_channels=out_channels,
                 kernel_size=kernel_size,
                 padding=kernel_size // 2,
-                init=init,
+
             )
             self.pre = conv_layer(
-                in_channels=out_channels, out_channels=out_channels, kernel_size=1, init=init,
+                in_channels=out_channels, out_channels=out_channels, kernel_size=1,
             )
         else:
             self.conv2d = conv_layer(
@@ -195,7 +194,7 @@ class VUnetResnetBlock(nn.Module):
                 out_channels=out_channels,
                 kernel_size=kernel_size,
                 padding=kernel_size // 2,
-                init=init,
+
             )
 
         if self.gated:
@@ -204,7 +203,7 @@ class VUnetResnetBlock(nn.Module):
                 out_channels=out_channels,
                 kernel_size=kernel_size,
                 padding=kernel_size // 2,
-                init=init,
+
             )
             self.dout2 = nn.Dropout(p=dropout_prob)
             self.sigm = nn.Sigmoid()
@@ -218,7 +217,8 @@ class VUnetResnetBlock(nn.Module):
 
         if self.use_skip:
             assert a is not None
-            a = self.pre(a)  # TODO 输入的a也是没激活的，self.pre 也不带激活函数
+            a = self.act_fn(a)
+            a = self.pre(a)  # TODO 输入的a也是没激活的，self.pre 也不带激活函数, 现在加上了激活
             x_prc = torch.cat([x_prc, a], dim=1)
 
         x_prc = self.act_fn(x_prc)  # 上一层的激活 推迟
@@ -241,12 +241,12 @@ if __name__ == '__main__':
     out1 = module(torch.rand(4, 3, 16, 16))  # 这里的结果是 v*x/||v||
     loss1 = torch.sum((torch.ones_like(out1) - out1) ** 2 + out1, dim=[0, 1, 2, 3])
 
-    module_dict = module.state_dict()
-    torch.save(module_dict, "./module.pt")
-
-    module = MyWeightNorm2d(in_channels=3, out_channels=10, kernel_size=3, padding = 1, init = True)
-    module_dict_restored = torch.load("./module.pt")
-    module.load_state_dict(module_dict_restored)
+    # module_dict = module.state_dict()
+    # torch.save(module_dict, "./module.pt")
+    #
+    # module = MyWeightNorm2d(in_channels=3, out_channels=10, kernel_size=3, padding = 1, init = True)
+    # module_dict_restored = torch.load("./module.pt")
+    # module.load_state_dict(module_dict_restored)
 
     # optimizer = optim.Adam(module.parameters(), lr=1e-1, betas=(0.5, 0.9))
     # optimizer.zero_grad()

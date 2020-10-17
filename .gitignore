@@ -3,6 +3,6 @@ log/
 .idea/
 __pycache__/
 
-MyTrain.py
-datasets/MyDataset.py
-weight_norm_test.py
+
+
+
