@@ -44,7 +44,6 @@ class MyTrain(object):
         # prepare logging and ckpt dir
         check_then_mkdir(self.config["log_dir"])
         check_then_mkdir(self.config["ckpt_dir"])
-        check_then_mkdir(self.config["exp_name"])
 
         # copy current experiment hyper-parameters settings
         check_then_mkdir(os.path.join(self.log_dir, self.exp_name))
