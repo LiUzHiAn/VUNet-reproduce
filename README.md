@@ -54,10 +54,8 @@ Specifically, they are:
  The VGG loss in this repo is bug-free; 
 
 # Training results
-We provide some visualization results during training processing below. The left is input stickman image,
-and the right is reconstruction image.
-![stickman](./assets/stickman_in.gif)
-![prediction](./assets/prediction_out.gif)
+We provide some visualization results during training processing below. The left is input stickman image, and the right is reconstructed image.
+![stickman](./assets/stickman_in.gif)![prediction](./assets/prediction_out.gif)
 
 # Pre-trained models
 To be done.
