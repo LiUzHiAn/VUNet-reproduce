@@ -1,6 +1,7 @@
 exp_name: right-VUNnet
 log_dir: ./log
 ckpt_dir: ./ckpt
+data_root: /home/liuzhian/hdd/datasets/deepfashion/
 
 losses:
     color_L1:
@@ -20,7 +21,7 @@ losses:
 #        gram_weights: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
 # Mandatory Training Parameters
 batch_size: 4
-num_epochs: 40
+num_epochs: 40  # 23 K image
 
 # Learning rate
 lr: 0.0001

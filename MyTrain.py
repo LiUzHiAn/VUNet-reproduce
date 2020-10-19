@@ -64,12 +64,12 @@ class MyTrain(object):
             self.L1LossInstances.cuda()
             self.vggPerceptualLossInstances.cuda()
 
-        self.TrainDataset = MyDeepFashion('/home/liuzhian/hdd/datasets/deepfashion/index.p')
-        self.TestDataset = MyDeepFashion('/home/liuzhian/hdd/datasets/deepfashion/index.p', is_train=False)
+        self.TrainDataset = MyDeepFashion(os.path.join(self.config["data_root"], 'index.p'))
+        self.TestDataset = MyDeepFashion(os.path.join(self.config["data_root"], 'index.p'), is_train=False)
 
-        self.TrainLoader = DataLoader(self.TrainDataset, num_workers=0, batch_size=self.config['batch_size'],
+        self.TrainLoader = DataLoader(self.TrainDataset, num_workers=4, batch_size=self.config['batch_size'],
                                       shuffle=True)
-        self.TestLoader = DataLoader(self.TestDataset, num_workers=0, batch_size=self.config['batch_size'],
+        self.TestLoader = DataLoader(self.TestDataset, num_workers=4, batch_size=self.config['batch_size'],
                                      shuffle=False)
 
         self.summary = SummaryWriter(logdir=os.path.join(self.log_dir, self.exp_name))
